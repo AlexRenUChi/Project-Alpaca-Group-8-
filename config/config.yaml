@@ -1,0 +1,45 @@
+# =============================================================
+# Trading system configuration.
+# API keys do NOT go here — they live in .env (see .env.example).
+# =============================================================
+
+universe:                # 5–20 tickers the system trades
+  - AAPL
+  - MSFT
+  - NVDA
+  - AMZN
+  - GOOGL
+  - META
+  - JPM
+  - XOM
+  - UNH
+  - SPY
+
+data:
+  feed: iex              # iex (free) or sip (paid subscription)
+  timeframe: 1Day        # bar size used for signals
+  history_days: 200      # rolling history kept per symbol
+  poll_interval_sec: 60  # engine loop frequency in paper mode
+
+strategy:
+  name: momentum         # momentum | ml
+  momentum:
+    lookback_days: 20    # momentum measurement window
+    trend_filter_days: 50  # only long if close > SMA(this)
+    top_n: 3             # number of names held at once
+  ml:                    # used by the ML research strategy / backtest tab
+    model_type: Random Forest
+    prob_threshold: 0.60
+    variance_threshold: 0.80
+
+risk:
+  max_position_notional: 5000   # max $ per asset
+  max_gross_notional: 15000     # max total $ exposure (no leverage)
+  max_order_notional: 5000      # max $ per single order
+  stop_loss_pct: 0.05           # close position if down 5%
+  take_profit_pct: 0.10         # close position if up 10%
+  max_positions: 5              # max simultaneous holdings
+
+backtest:
+  initial_capital: 100000
+  years: 5
