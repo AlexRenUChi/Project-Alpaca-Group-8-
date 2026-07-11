@@ -111,13 +111,17 @@ with tab_dash:
     with left:
         st.subheader("Recent Signals")
         sig = store.recent_signals(25)
-        st.dataframe(sig, use_container_width=True, height=280) if not sig.empty \
-            else st.caption("No signals logged yet.")
+        if not sig.empty:
+            st.dataframe(sig, use_container_width=True, height=280)
+        else:
+            st.caption("No signals logged yet.")
     with right:
         st.subheader("Recent Orders")
         orders = store.recent_orders(25)
-        st.dataframe(orders, use_container_width=True, height=280) if not orders.empty \
-            else st.caption("No orders logged yet.")
+        if not orders.empty:
+            st.dataframe(orders, use_container_width=True, height=280)
+        else:
+            st.caption("No orders logged yet.")
 
 # ---------------------------------------------------------------- backtest
 with tab_backtest:
@@ -244,8 +248,10 @@ with tab_quotes:
             st.error(f"Quote fetch failed: {err}")
     st.markdown("**Recently stored quotes (data pipeline log)**")
     recent = store.recent_quotes(50)
-    st.dataframe(recent, use_container_width=True) if not recent.empty \
-        else st.caption("No quotes stored yet — start the engine.")
+    if not recent.empty:
+        st.dataframe(recent, use_container_width=True)
+    else:
+        st.caption("No quotes stored yet — start the engine.")
 
 # --------------------------------------------------------------------- risk
 with tab_risk:
