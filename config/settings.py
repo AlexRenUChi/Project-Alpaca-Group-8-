@@ -60,12 +60,15 @@ class RiskConfig:
     stop_loss_pct: float = 0.05
     take_profit_pct: float = 0.10
     max_positions: int = 5
+    cooldown_hours: int = 24
 
 
 @dataclass
 class BacktestConfig:
     initial_capital: float = 100_000
     years: int = 5
+    transaction_cost_bps: float = 1.0
+    slippage_bps: float = 2.0
 
 
 @dataclass
@@ -108,6 +111,7 @@ def save_risk_limits(risk: RiskConfig, path: Path | str = CONFIG_PATH) -> None:
         "stop_loss_pct": risk.stop_loss_pct,
         "take_profit_pct": risk.take_profit_pct,
         "max_positions": risk.max_positions,
+        "cooldown_hours": risk.cooldown_hours,
     }
     Path(path).write_text(yaml.safe_dump(raw, sort_keys=False))
 

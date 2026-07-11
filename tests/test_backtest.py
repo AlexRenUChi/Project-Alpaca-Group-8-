@@ -48,3 +48,32 @@ def test_portfolio_backtest_weights_and_metrics():
     assert result["equity"].iloc[0] > 0
     assert -1 <= metrics["Maximum Drawdown"] <= 0
     assert metrics["Trades"] >= 0
+
+
+def test_live_notional_caps_limit_backtest_exposure():
+    idx = pd.bdate_range("2024-01-02", periods=5)
+    prices = pd.DataFrame({"AAA": [100, 101, 102, 103, 104]}, index=idx)
+    targets = pd.DataFrame({"AAA": 1.0}, index=idx)
+    result = run_portfolio_backtest(
+        prices, targets, 100_000,
+        max_gross_notional=15_000,
+        max_position_notional=5_000,
+    )
+    assert result["weights"].iloc[0, 0] == 0
+    assert abs(result["weights"].iloc[1, 0] - 0.05) < 1e-12
+    assert result["equity"].iloc[-1] < 101_000  # not a fully invested backtest
+
+
+def test_stop_loss_blocks_immediate_reentry():
+    idx = pd.bdate_range("2024-01-02", periods=5)
+    prices = pd.DataFrame({"AAA": [100, 100, 90, 91, 92]}, index=idx)
+    targets = pd.DataFrame({"AAA": 1.0}, index=idx)
+    result = run_portfolio_backtest(
+        prices, targets, 100_000,
+        max_gross_notional=100_000,
+        max_position_notional=100_000,
+        stop_loss_pct=0.05,
+        cooldown_days=1,
+    )
+    # Loss is observed at day 3's close; day 4 is flat rather than re-entered.
+    assert result["weights"].iloc[3, 0] == 0

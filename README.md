@@ -33,11 +33,13 @@ Streamlit dashboard to monitor and control everything.
 ```
 
 The engine loop (`execution/engine.py`) runs every `poll_interval_sec`:
-**data** (log latest quotes to SQLite, refresh rolling bar history) →
-**risk** (stop-loss / take-profit exits) → **signals** (strategy → target
-weights, logged) → **execution** (diff targets vs. positions → risk-checked
-orders → order-state polling) → **monitoring** (equity snapshot + state file
-for the UI).
+**data** (log latest quotes to SQLite, refresh rolling bar history) → **order
+reconciliation** (recover open/non-terminal orders) → **risk** (stop-loss /
+take-profit exits and persistent re-entry cooldowns) → **signals** (strategy →
+target weights, logged) → **execution** (diff targets vs. positions *and open
+orders* → risk-checked, idempotent orders) → **monitoring** (equity snapshot +
+state file for the UI). Market orders are never queued while the market is
+closed.
 
 ## Folder structure
 
@@ -106,23 +108,32 @@ there is no look-ahead.
 ## Risk controls
 
 All limits live in `config.yaml → risk` and are enforced by `risk/manager.py`
-before any order reaches the broker:
+before any order reaches the broker. Existing positions and all open buy
+orders are included in every projected-exposure check:
 
 max $ per position (`max_position_notional`), max total exposure with no
 leverage (`max_gross_notional`), max $ per order (`max_order_notional`),
 max simultaneous positions (`max_positions`), plus per-position **stop-loss**
 (−5%) and **take-profit** (+10%) exits checked every cycle before new signals.
-Sell/close orders are always allowed since they reduce risk. Rejected orders
-are logged with the reason and shown in the UI.
+A risk exit starts a persistent 24-hour cooldown, so the strategy cannot buy
+the symbol back in the same or next cycle. Sell/close orders are always allowed
+since they reduce risk. Rejected orders are logged with the reason and shown
+in the UI.
+
+The portfolio backtest uses these same gross/position caps, stop and take-profit
+rules, and cooldown. It also applies the configured transaction-cost and
+slippage assumptions. The equal-weight benchmark is exposure-matched to make
+the comparison meaningful.
 
 ## Monitoring & logging
 
 Everything is logged to `logs/system.log` and to a SQLite database
 (`storage/trading.db`): incoming quotes (timestamps, bid/ask), every signal,
-every order with its lifecycle status (`submitted → filled / partially_filled
-/ canceled / rejected / risk_rejected`), and periodic equity snapshots. The
-dashboard shows cumulative P&L, max drawdown, trade count, hit rate, the
-equity curve, open positions with P&L, and recent signals/orders.
+every unique order-state transition (`accepted/new → partially_filled → filled
+/ canceled / rejected / risk_rejected`), persistent cooldowns, and periodic
+equity snapshots. Non-terminal orders are reconciled in later cycles and after
+restarts. Realized P&L uses actual filled quantity and average fill price; the
+dashboard's trade count and hit rate are based on completed sell/close trades.
 
 ## Example walkthrough
 
@@ -131,8 +142,8 @@ equity curve, open positions with P&L, and recent signals/orders.
    flips to **🟢 RUNNING** and the market-open flag updates.
 3. Dashboard tab: equity, positions, and the signals/orders tables fill in as
    cycles complete (run during US market hours to see fills).
-4. Backtesting tab: run the momentum backtest vs. equal-weight buy & hold —
-   metrics table, equity curves, drawdown chart.
+4. Backtesting tab: run momentum vs. the exposure-matched equal-weight
+   benchmark — metrics table, equity curves, drawdown chart.
 5. Risk & Config tab: tighten `max_position_notional`, save, restart the
    engine, and watch oversized orders get rejected with reasons.
 6. Click **⏹ Stop** — the engine shuts down cleanly within seconds.
@@ -140,19 +151,20 @@ equity curve, open positions with P&L, and recent signals/orders.
 ## Error handling
 
 Network errors and rate limits are retried with exponential backoff (data and
-broker layers). Rejected orders are caught and logged, never crash the loop.
-A failed cycle logs the exception, surfaces `status: error` to the UI, and
-the engine continues on the next cycle. Orders submitted while the market is
-closed queue as `accepted` (Alpaca DAY orders) and are reported as such.
+broker layers). Every market order has a unique `client_order_id`, so a timeout
+can recover the already-accepted order without duplicating it. Rejected orders
+are caught and logged, never crash the loop. A failed cycle logs the exception,
+surfaces `status: error` to the UI, and the engine continues on the next cycle.
+Outside market hours signals are recorded, but no market orders are submitted.
 
 ## Limitations & possible improvements
 
-Daily-bar momentum rebalanced by market orders ignores transaction costs,
-slippage, and intraday information; notional market orders can partially fill;
-the engine polls REST rather than maintaining a persistent websocket for
-signal data (the stream is implemented in `data/connector.py` and used for
-quote logging demos); config changes require an engine restart. Natural
-extensions: limit orders with resting-order management, cost-aware backtests,
+Daily-bar momentum and close-to-close stop simulation ignore intraday paths;
+configured transaction costs and slippage are estimates, not an execution
+simulator. The engine reconciles orders through REST rather than maintaining a
+persistent trade-update websocket (the market-data stream is implemented in
+`data/connector.py`); config changes require an engine restart. Natural
+extensions: limit orders with resting-order management, trade-update streaming,
 walk-forward retraining of the ML strategy, and a proper database for
 multi-day history.
 

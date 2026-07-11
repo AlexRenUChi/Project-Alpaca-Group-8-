@@ -1,10 +1,12 @@
 """Structured storage for market data and trading activity (SQLite).
 
-One small database (storage/trading.db) with four tables:
+One small database (storage/trading.db) with six tables:
   quotes   — incoming bid/ask snapshots (the data-pipeline log)
   signals  — every signal the strategy generates
-  orders   — every order submitted, with its lifecycle status
+  orders   — legacy-compatible one-row order log
+  order_events — unique states, fills, prices and realized P&L per order
   equity   — periodic account-equity snapshots for P&L / drawdown
+  cooldowns — persistent stop-loss/take-profit re-entry blocks
 
 SQLite is used because it is structured, queryable, file-based, and in the
 standard library — no server needed.
@@ -13,7 +15,8 @@ standard library — no server needed.
 from __future__ import annotations
 
 import sqlite3
-from datetime import datetime, timezone
+import uuid
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pandas as pd
@@ -36,11 +39,23 @@ CREATE TABLE IF NOT EXISTS orders (
     side TEXT NOT NULL, notional REAL, qty REAL,
     status TEXT NOT NULL, reason TEXT, realized_pnl REAL
 );
+CREATE TABLE IF NOT EXISTS order_events (
+    ts TEXT NOT NULL, order_id TEXT NOT NULL, symbol TEXT NOT NULL,
+    side TEXT NOT NULL, status TEXT NOT NULL,
+    requested_notional REAL, filled_qty REAL NOT NULL DEFAULT 0,
+    filled_avg_price REAL, entry_price REAL, reason TEXT, realized_pnl REAL,
+    UNIQUE(order_id, status, filled_qty)
+);
 CREATE TABLE IF NOT EXISTS equity (
     ts TEXT NOT NULL, equity REAL NOT NULL, cash REAL, gross_exposure REAL
 );
+CREATE TABLE IF NOT EXISTS cooldowns (
+    symbol TEXT PRIMARY KEY, until_ts TEXT NOT NULL, reason TEXT
+);
 CREATE INDEX IF NOT EXISTS idx_quotes_ts ON quotes (ts);
 CREATE INDEX IF NOT EXISTS idx_orders_ts ON orders (ts);
+CREATE INDEX IF NOT EXISTS idx_order_events_ts ON order_events (ts);
+CREATE INDEX IF NOT EXISTS idx_order_events_id ON order_events (order_id);
 """
 
 
@@ -80,6 +95,28 @@ class TradeStore:
                          (_now(), order_id, symbol, side, notional, qty,
                           status, reason, realized_pnl))
 
+    def log_order_event(self, order_id: str, symbol: str, side: str, status: str,
+                        requested_notional: float | None = None,
+                        filled_qty: float = 0.0,
+                        filled_avg_price: float | None = None,
+                        entry_price: float | None = None,
+                        reason: str = "",
+                        realized_pnl: float | None = None) -> None:
+        """Persist one unique lifecycle state for an order.
+
+        The unique key makes repeated REST reconciliation idempotent while still
+        retaining partial-fill progress when filled quantity changes.
+        """
+        order_id = order_id or f"local-{uuid.uuid4()}"
+        with self._conn() as conn:
+            conn.execute(
+                """INSERT OR IGNORE INTO order_events
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                (_now(), order_id, symbol, side, status, requested_notional,
+                 float(filled_qty or 0.0), filled_avg_price, entry_price,
+                 reason, realized_pnl),
+            )
+
     def log_equity(self, equity: float, cash: float | None = None,
                    gross_exposure: float | None = None) -> None:
         with self._conn() as conn:
@@ -98,7 +135,56 @@ class TradeStore:
         return self._read("SELECT * FROM signals ORDER BY ts DESC LIMIT ?", (limit,))
 
     def recent_orders(self, limit: int = 50) -> pd.DataFrame:
+        events = self._read(
+            """SELECT ts, order_id, symbol, side, requested_notional AS notional,
+                      filled_qty AS qty, filled_avg_price, status, reason, realized_pnl
+               FROM order_events ORDER BY ts DESC LIMIT ?""", (limit,))
+        if not events.empty:
+            return events
         return self._read("SELECT * FROM orders ORDER BY ts DESC LIMIT ?", (limit,))
+
+    def pending_order_ids(self) -> list[str]:
+        """Order IDs whose latest observed state is not terminal."""
+        terminal = ("filled", "canceled", "expired", "rejected", "replaced",
+                    "done_for_day", "stopped", "suspended", "calculated",
+                    "risk_rejected")
+        placeholders = ",".join("?" for _ in terminal)
+        df = self._read(
+            f"""SELECT e.order_id
+                FROM order_events e
+                JOIN (SELECT order_id, MAX(rowid) AS max_rowid
+                      FROM order_events GROUP BY order_id) latest
+                  ON e.rowid = latest.max_rowid
+                WHERE e.status NOT IN ({placeholders})""", terminal)
+        return df["order_id"].tolist() if not df.empty else []
+
+    def order_context(self, order_id: str) -> dict:
+        df = self._read(
+            """SELECT symbol, side, requested_notional, entry_price, reason
+               FROM order_events WHERE order_id=? ORDER BY rowid LIMIT 1""",
+            (order_id,),
+        )
+        if df.empty:
+            return {}
+        return {key: (None if pd.isna(value) else value)
+                for key, value in df.iloc[0].to_dict().items()}
+
+    def set_cooldown(self, symbol: str, hours: int, reason: str) -> None:
+        until = datetime.now(timezone.utc) + timedelta(hours=max(1, hours))
+        with self._conn() as conn:
+            conn.execute(
+                """INSERT INTO cooldowns(symbol, until_ts, reason) VALUES (?,?,?)
+                   ON CONFLICT(symbol) DO UPDATE SET
+                     until_ts=excluded.until_ts, reason=excluded.reason""",
+                (symbol, until.isoformat(), reason),
+            )
+
+    def active_cooldowns(self) -> dict[str, str]:
+        now = _now()
+        with self._conn() as conn:
+            conn.execute("DELETE FROM cooldowns WHERE until_ts <= ?", (now,))
+        df = self._read("SELECT symbol, reason FROM cooldowns WHERE until_ts > ?", (now,))
+        return dict(zip(df["symbol"], df["reason"])) if not df.empty else {}
 
     def equity_curve(self) -> pd.DataFrame:
         df = self._read("SELECT * FROM equity ORDER BY ts")
@@ -117,11 +203,19 @@ class TradeStore:
             series = eq["equity"]
             out["cumulative_pnl"] = float(series.iloc[-1] - series.iloc[0])
             out["max_drawdown"] = float((series / series.cummax() - 1).min())
+        terminal = ("filled", "canceled", "expired", "rejected", "replaced",
+                    "done_for_day", "stopped", "suspended", "calculated")
+        placeholders = ",".join("?" for _ in terminal)
         orders = self._read(
-            "SELECT realized_pnl FROM orders WHERE status='filled' AND side='sell'")
+            f"""SELECT e.order_id, e.realized_pnl
+                FROM order_events e
+                JOIN (SELECT order_id, MAX(rowid) AS max_rowid
+                      FROM order_events GROUP BY order_id) latest
+                  ON e.rowid = latest.max_rowid
+                WHERE e.side='sell' AND e.status IN ({placeholders})
+                  AND e.filled_qty > 0""", terminal)
         closed = orders["realized_pnl"].dropna()
-        filled = self._read("SELECT COUNT(*) AS n FROM orders WHERE status='filled'")
-        out["num_trades"] = int(filled["n"].iloc[0])
+        out["num_trades"] = int(len(closed))
         if len(closed):
             out["hit_rate"] = float((closed > 0).mean())
         return out

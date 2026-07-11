@@ -45,6 +45,9 @@ st.sidebar.markdown(f"**Mode:** {state.get('mode', 'paper')}  \n"
                     f"**Strategy:** {state.get('strategy', settings.strategy.name)}  \n"
                     f"**Market:** {'open' if state.get('market_open') else 'closed/unknown'}  \n"
                     f"**Last update:** {state.get('updated_at', '—')[:19]}")
+active_cooldowns = state.get("active_cooldowns") or {}
+if active_cooldowns:
+    st.sidebar.warning("Risk cooldown: " + ", ".join(active_cooldowns))
 
 col_start, col_stop = st.sidebar.columns(2)
 if col_start.button("▶ Start", disabled=running, use_container_width=True):
@@ -80,7 +83,7 @@ with tab_dash:
               f"${metrics['cumulative_pnl']:,.0f}" if metrics["cumulative_pnl"] is not None else "—")
     c3.metric("Max Drawdown",
               f"{metrics['max_drawdown']:.2%}" if metrics["max_drawdown"] is not None else "—")
-    c4.metric("Trades / Hit Rate",
+    c4.metric("Closed Trades / Hit Rate",
               f"{metrics['num_trades']}"
               + (f" / {metrics['hit_rate']:.0%}" if metrics["hit_rate"] is not None else ""))
 
@@ -118,8 +121,8 @@ with tab_dash:
 
 # ---------------------------------------------------------------- backtest
 with tab_backtest:
-    st.subheader("Portfolio Backtest — Momentum vs Buy & Hold")
-    st.caption("Runs the exact live strategy rules on historical Alpaca data.")
+    st.subheader("Portfolio Backtest — Momentum vs Exposure-Matched Benchmark")
+    st.caption("Uses the live notional caps, stops, cooldown, costs and slippage.")
     years = st.slider("Years of history", 1, 10, settings.backtest.years)
     if st.button("Run Momentum Backtest", type="primary"):
         from backtest.engine import (calculate_metrics, format_metrics,
@@ -143,20 +146,31 @@ with tab_backtest:
             weights = momentum_weight_matrix(prices, m.lookback_days,
                                              m.trend_filter_days, m.top_n)
             result = run_portfolio_backtest(prices, weights,
-                                            settings.backtest.initial_capital)
+                                            settings.backtest.initial_capital,
+                max_gross_notional=settings.risk.max_gross_notional,
+                max_position_notional=settings.risk.max_position_notional,
+                stop_loss_pct=settings.risk.stop_loss_pct,
+                take_profit_pct=settings.risk.take_profit_pct,
+                cooldown_days=max(1, (settings.risk.cooldown_hours + 23) // 24),
+                transaction_cost_bps=settings.backtest.transaction_cost_bps,
+                slippage_bps=settings.backtest.slippage_bps)
             bench_w = pd.DataFrame(1 / prices.shape[1], index=prices.index,
                                    columns=prices.columns)
             bench = run_portfolio_backtest(prices, bench_w,
-                                           settings.backtest.initial_capital)
+                                           settings.backtest.initial_capital,
+                max_gross_notional=settings.risk.max_gross_notional,
+                max_position_notional=settings.risk.max_position_notional,
+                transaction_cost_bps=settings.backtest.transaction_cost_bps,
+                slippage_bps=settings.backtest.slippage_bps)
 
         table = pd.DataFrame({"Momentum": calculate_metrics(result),
-                              "Equal-Weight Buy & Hold": calculate_metrics(bench)}).T
+                              "Exposure-Matched Equal Weight": calculate_metrics(bench)}).T
         st.dataframe(format_metrics(table), use_container_width=True)
 
         fig = go.Figure()
         fig.add_scatter(x=result["equity"].index, y=result["equity"], name="Momentum")
         fig.add_scatter(x=bench["equity"].index, y=bench["equity"],
-                        name="Buy & Hold", line=dict(dash="dot"))
+                        name="Exposure-Matched Benchmark", line=dict(dash="dot"))
         fig.update_layout(title="Equity Curves", height=350,
                           margin=dict(l=10, r=10, t=40, b=10))
         st.plotly_chart(fig, use_container_width=True)
@@ -254,6 +268,8 @@ with tab_risk:
                                float(risk.take_profit_pct), 0.01, format="%.2f")
         max_n = r6.number_input("Max simultaneous positions", 1, 20,
                                 int(risk.max_positions))
+        cooldown = st.number_input("Risk-exit cooldown (hours)", 1, 168,
+                                   int(risk.cooldown_hours))
         if st.form_submit_button("Save Risk Limits", type="primary"):
             risk.max_position_notional = max_pos
             risk.max_gross_notional = max_gross
@@ -261,6 +277,7 @@ with tab_risk:
             risk.stop_loss_pct = stop
             risk.take_profit_pct = take
             risk.max_positions = int(max_n)
+            risk.cooldown_hours = int(cooldown)
             save_risk_limits(risk)
             st.success("Saved to config/config.yaml. Restart the engine to apply.")
 

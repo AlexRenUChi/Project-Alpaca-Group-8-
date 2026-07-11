@@ -40,16 +40,32 @@ def run_backtest_mode(settings) -> None:
     m = cfg.strategy.momentum
     weights = momentum_weight_matrix(prices, m.lookback_days,
                                      m.trend_filter_days, m.top_n)
-    result = run_portfolio_backtest(prices, weights, cfg.backtest.initial_capital)
+    live_risk = dict(
+        max_gross_notional=cfg.risk.max_gross_notional,
+        max_position_notional=cfg.risk.max_position_notional,
+        stop_loss_pct=cfg.risk.stop_loss_pct,
+        take_profit_pct=cfg.risk.take_profit_pct,
+        cooldown_days=max(1, (cfg.risk.cooldown_hours + 23) // 24),
+        transaction_cost_bps=cfg.backtest.transaction_cost_bps,
+        slippage_bps=cfg.backtest.slippage_bps,
+    )
+    result = run_portfolio_backtest(
+        prices, weights, cfg.backtest.initial_capital, **live_risk)
 
     # Equal-weight buy & hold benchmark on the same universe
     bench_weights = pd.DataFrame(1 / prices.shape[1], index=prices.index,
                                  columns=prices.columns)
-    bench = run_portfolio_backtest(prices, bench_weights, cfg.backtest.initial_capital)
+    bench = run_portfolio_backtest(
+        prices, bench_weights, cfg.backtest.initial_capital,
+        max_gross_notional=cfg.risk.max_gross_notional,
+        max_position_notional=cfg.risk.max_position_notional,
+        transaction_cost_bps=cfg.backtest.transaction_cost_bps,
+        slippage_bps=cfg.backtest.slippage_bps,
+    )
 
     table = pd.DataFrame({
         "Momentum": calculate_metrics(result),
-        "Equal-Weight Buy & Hold": calculate_metrics(bench),
+        "Exposure-Matched Equal Weight": calculate_metrics(bench),
     }).T
     print("\n" + format_metrics(table).to_string())
     print(f"\nFinal equity: ${result['equity'].iloc[-1]:,.0f} "

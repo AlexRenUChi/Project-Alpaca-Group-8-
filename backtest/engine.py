@@ -62,24 +62,132 @@ def momentum_weight_matrix(prices: pd.DataFrame, lookback: int = 20,
     return weights.fillna(0.0)
 
 
-def run_portfolio_backtest(prices: pd.DataFrame, weights: pd.DataFrame,
-                           initial_capital: float = 100_000) -> dict:
-    """Backtest a daily weight matrix over a price panel (no look-ahead)."""
-    weights = weights.reindex(prices.index).fillna(0).shift(1).fillna(0)
-    asset_returns = prices.pct_change().fillna(0)
-    strategy_returns = (weights * asset_returns).sum(axis=1)
-    equity = initial_capital * (1 + strategy_returns).cumprod()
-    turnover = weights.diff().abs().sum(axis=1).fillna(0)
+def run_portfolio_backtest(
+    prices: pd.DataFrame,
+    weights: pd.DataFrame,
+    initial_capital: float = 100_000,
+    *,
+    max_gross_notional: float | None = None,
+    max_position_notional: float | None = None,
+    stop_loss_pct: float | None = None,
+    take_profit_pct: float | None = None,
+    cooldown_days: int = 1,
+    transaction_cost_bps: float = 0.0,
+    slippage_bps: float = 0.0,
+    rebalance_band: float = 250.0,
+) -> dict:
+    """Backtest daily targets with the same notional/risk rules as paper mode.
+
+    Target rows are decided at close *t* and become effective for return *t+1*.
+    When notional caps are supplied, input weights are fractions of the allowed
+    gross budget (matching ``TradingEngine._rebalance``), not fractions of the
+    entire account. Stops are close-to-close approximations and trigger a
+    configurable trading-day re-entry cooldown. Costs apply to dollar turnover.
+    """
+    prices = prices.sort_index().copy()
+    raw_targets = weights.reindex(index=prices.index, columns=prices.columns).fillna(0)
+    asset_returns = prices.pct_change(fill_method=None).fillna(0)
+
+    # Preserve the small, fast vectorised path for callers that do not request
+    # live risk parity (including the single-purpose unit tests).
+    use_live_rules = any(v is not None for v in (
+        max_gross_notional, max_position_notional, stop_loss_pct, take_profit_pct,
+    )) or transaction_cost_bps or slippage_bps
+    if not use_live_rules:
+        executed_weights = raw_targets.shift(1).fillna(0)
+        strategy_returns = (executed_weights * asset_returns).sum(axis=1)
+        equity = initial_capital * (1 + strategy_returns).cumprod()
+        turnover = executed_weights.diff().abs().sum(axis=1).fillna(0)
+        trades = (executed_weights.diff().abs() > 1e-9).sum(axis=1).astype(float)
+    else:
+        current = pd.Series(0.0, index=prices.columns)
+        entry_prices: dict[str, float] = {}
+        cooldown_until: dict[str, int] = {}
+        equity_value = float(initial_capital)
+        cost_rate = (transaction_cost_bps + slippage_bps) / 10_000
+        weight_rows: list[pd.Series] = []
+        return_rows: list[float] = []
+        equity_rows: list[float] = []
+        turnover_rows: list[float] = []
+        trade_rows: list[float] = []
+
+        for i, date in enumerate(prices.index):
+            # Holdings chosen yesterday earn today's close-to-close return.
+            weight_rows.append(current.copy())
+            gross_return = float((current * asset_returns.loc[date]).sum())
+            equity_value *= 1 + gross_return
+            denominator = max(1 + gross_return, 1e-12)
+            post_weights = (current * (1 + asset_returns.loc[date]) / denominator)
+
+            triggered: set[str] = set()
+            for symbol in prices.columns:
+                if current[symbol] <= 0 or symbol not in entry_prices:
+                    continue
+                px = prices.at[date, symbol]
+                entry = entry_prices[symbol]
+                if pd.isna(px) or entry <= 0:
+                    continue
+                pnl_pct = float(px / entry - 1)
+                if ((stop_loss_pct is not None and pnl_pct <= -stop_loss_pct)
+                        or (take_profit_pct is not None and pnl_pct >= take_profit_pct)):
+                    triggered.add(symbol)
+                    cooldown_until[symbol] = i + max(1, cooldown_days)
+
+            target = raw_targets.loc[date].clip(lower=0).copy()
+            for symbol in prices.columns:
+                if symbol in triggered or i < cooldown_until.get(symbol, -1):
+                    target[symbol] = 0.0
+
+            gross_budget = (equity_value if max_gross_notional is None
+                            else min(max_gross_notional, equity_value))
+            target_dollars = target * gross_budget
+            if max_position_notional is not None:
+                target_dollars = target_dollars.clip(upper=max_position_notional)
+            total_target = float(target_dollars.sum())
+            if total_target > gross_budget and total_target > 0:
+                target_dollars *= gross_budget / total_target
+            current_dollars = post_weights * equity_value
+            desired_dollars = current_dollars.copy()
+            for symbol in prices.columns:
+                if target_dollars[symbol] <= 0:
+                    desired_dollars[symbol] = 0.0
+                elif target_dollars[symbol] - current_dollars[symbol] > rebalance_band:
+                    desired_dollars[symbol] = target_dollars[symbol]
+            desired = desired_dollars / max(equity_value, 1e-12)
+
+            turnover_value = float((desired - post_weights).abs().sum())
+            cost_return = turnover_value * cost_rate
+            equity_value *= 1 - cost_return
+            net_return = (1 + gross_return) * (1 - cost_return) - 1
+            return_rows.append(net_return)
+            equity_rows.append(equity_value)
+            turnover_rows.append(turnover_value)
+            trade_rows.append(float(((desired - post_weights).abs() > 1e-9).sum()))
+
+            for symbol in prices.columns:
+                if post_weights[symbol] <= 0 < desired[symbol]:
+                    px = prices.at[date, symbol]
+                    if not pd.isna(px):
+                        entry_prices[symbol] = float(px)
+                elif desired[symbol] <= 0:
+                    entry_prices.pop(symbol, None)
+            current = desired
+
+        executed_weights = pd.DataFrame(weight_rows, index=prices.index)
+        strategy_returns = pd.Series(return_rows, index=prices.index)
+        equity = pd.Series(equity_rows, index=prices.index)
+        turnover = pd.Series(turnover_rows, index=prices.index)
+        trades = pd.Series(trade_rows, index=prices.index)
 
     return {
-        "position": (weights > 0).sum(axis=1),
-        "weights": weights,
+        "position": (executed_weights > 0).sum(axis=1),
+        "weights": executed_weights,
         "returns": strategy_returns,
         "equity": equity,
         "pnl": equity.diff().fillna(0),
         "cumulative_pnl": equity - initial_capital,
         "drawdown": equity / equity.cummax() - 1,
-        "trades": (weights.diff().abs() > 1e-9).sum(axis=1).astype(float),
+        "trades": trades,
         "turnover": turnover,
         "initial_capital": initial_capital,
     }

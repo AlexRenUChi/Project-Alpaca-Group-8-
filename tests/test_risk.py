@@ -67,3 +67,22 @@ def test_stop_loss_and_take_profit_exits():
     assert "LOSER" in symbols and "STOP-LOSS" in symbols["LOSER"]
     assert "WINNER" in symbols and "TAKE-PROFIT" in symbols["WINNER"]
     assert "HOLD" not in symbols
+
+
+def test_open_buys_count_toward_position_and_gross_caps():
+    positions = {"AAPL": make_position("AAPL", 3000)}
+    ok, reason = manager().check_order(
+        OrderIntent("AAPL", "buy", 1001), positions, equity=100_000,
+        pending_buys={"AAPL": 1000}, cash=100_000)
+    assert not ok and "open buys" in reason
+
+
+def test_projected_gross_cannot_exceed_equity_even_with_higher_config_cap():
+    risk = RiskManager(RiskConfig(
+        max_position_notional=100_000, max_gross_notional=200_000,
+        max_order_notional=100_000, max_positions=10))
+    positions = {"AAPL": make_position("AAPL", 90_000)}
+    ok, reason = risk.check_order(
+        OrderIntent("MSFT", "buy", 20_000), positions, equity=100_000,
+        cash=100_000)
+    assert not ok and "no-leverage" in reason

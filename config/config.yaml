@@ -39,7 +39,10 @@ risk:
   stop_loss_pct: 0.05           # close position if down 5%
   take_profit_pct: 0.10         # close position if up 10%
   max_positions: 5              # max simultaneous holdings
+  cooldown_hours: 24            # block re-entry after a risk exit
 
 backtest:
   initial_capital: 100000
   years: 5
+  transaction_cost_bps: 1.0     # commissions/fees assumption per turnover leg
+  slippage_bps: 2.0             # market-impact assumption per turnover leg
