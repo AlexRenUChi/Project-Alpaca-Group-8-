@@ -67,6 +67,35 @@ if st.sidebar.button("🔄 Refresh", use_container_width=True):
 auto = st.sidebar.checkbox("Auto-refresh (10s)", value=False)
 
 st.sidebar.divider()
+
+# ---- live strategy switch (engine applies it on its next cycle) ----------
+st.sidebar.markdown("### 🧠 Strategy")
+STRATEGY_LABELS = {"momentum": "Momentum (live)", "ml": "ML (research)"}
+current = (engine_state.read_strategy_override()
+           or state.get("strategy_name")
+           or settings.strategy.name)
+choice = st.sidebar.radio(
+    "Active strategy",
+    options=list(STRATEGY_LABELS),
+    format_func=lambda k: STRATEGY_LABELS[k],
+    index=list(STRATEGY_LABELS).index(current) if current in STRATEGY_LABELS else 0,
+    label_visibility="collapsed",
+)
+if choice != current:
+    engine_state.set_strategy(choice)
+    if running:
+        st.sidebar.success(f"Switching to {STRATEGY_LABELS[choice]} — "
+                           "applies on the engine's next cycle.")
+    else:
+        st.sidebar.info(f"{STRATEGY_LABELS[choice]} selected — "
+                        "starts with the engine.")
+    time.sleep(1)
+    st.rerun()
+if choice == "ml":
+    st.sidebar.caption("ML trains one model per symbol each cycle, so cycles "
+                       "are slower and need ≥300 bars of history.")
+
+st.sidebar.divider()
 st.sidebar.markdown(f"**Universe:** {', '.join(settings.universe)}")
 
 # -------------------------------------------------------------------- tabs

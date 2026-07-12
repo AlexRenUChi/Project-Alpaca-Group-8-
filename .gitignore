@@ -20,6 +20,7 @@ storage/*.db
 storage/*.json
 storage/*.pid
 storage/STOP
+storage/strategy_override
 
 # OS / editor
 .DS_Store

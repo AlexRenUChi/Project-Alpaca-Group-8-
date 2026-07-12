@@ -18,6 +18,7 @@ from config.settings import STORAGE_DIR
 STATE_PATH = STORAGE_DIR / "engine_state.json"
 PID_PATH = STORAGE_DIR / "engine.pid"
 STOP_PATH = STORAGE_DIR / "STOP"
+STRATEGY_PATH = STORAGE_DIR / "strategy_override"
 
 
 def write_state(state: dict) -> None:
@@ -71,6 +72,21 @@ def clear_stop() -> None:
     STOP_PATH.unlink(missing_ok=True)
 
 
+def set_strategy(name: str) -> None:
+    """Request a live strategy switch (the engine picks it up next cycle)."""
+    STORAGE_DIR.mkdir(exist_ok=True)
+    STRATEGY_PATH.write_text(name.strip())
+
+
+def read_strategy_override() -> str | None:
+    """The requested strategy name, or None if no override is set."""
+    if not STRATEGY_PATH.exists():
+        return None
+    name = STRATEGY_PATH.read_text().strip()
+    return name or None
+
+
 __all__ = ["write_state", "read_state", "write_pid", "clear_pid",
            "engine_running", "request_stop", "stop_requested", "clear_stop",
-           "STATE_PATH", "PID_PATH", "STOP_PATH"]
+           "set_strategy", "read_strategy_override",
+           "STATE_PATH", "PID_PATH", "STOP_PATH", "STRATEGY_PATH"]

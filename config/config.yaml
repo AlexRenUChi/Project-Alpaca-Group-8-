@@ -18,11 +18,11 @@ universe:                # 5–20 tickers the system trades
 data:
   feed: iex              # iex (free) or sip (paid subscription)
   timeframe: 1Day        # bar size used for signals
-  history_days: 200      # rolling history kept per symbol
+  history_days: 600      # rolling history kept per symbol (>=300 bars so ML can train)
   poll_interval_sec: 60  # engine loop frequency in paper mode
 
 strategy:
-  name: momentum         # momentum | ml
+  name: momentum         # momentum | ml (also switchable live from the UI sidebar)
   momentum:
     lookback_days: 20    # momentum measurement window
     trend_filter_days: 50  # only long if close > SMA(this)

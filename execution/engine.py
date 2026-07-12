@@ -212,6 +212,7 @@ class TradingEngine:
                 "mode": "paper",
                 "market_open": market_open,
                 "strategy": self.strategy.describe(),
+                "strategy_name": self.settings.strategy.name,
                 "cycle": self.cycles,
                 "equity": float(acct.equity),
                 "cash": float(acct.cash),
@@ -233,6 +234,13 @@ class TradingEngine:
         cfg = self.settings
         self.cycles += 1
         log.info("engine | ===== cycle %d =====", self.cycles)
+
+        # 0. honour a live strategy switch requested from the UI
+        override = engine_state.read_strategy_override()
+        if override and override != cfg.strategy.name:
+            cfg.strategy.name = override
+            self.strategy = make_strategy(cfg.strategy)
+            log.info("engine | strategy switched to %s", self.strategy.describe())
 
         # 1. quotes -> structured storage (the live data pipeline log)
         try:
