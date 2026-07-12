@@ -173,4 +173,4 @@ multi-day history.
 10–15 minutes covering: architecture (this diagram), the strategy rules and
 risk controls, a live demo of the dashboard with the engine running in paper
 mode (start → signals → orders → fills → stop), the backtest results, and
-reflections on limitations. Add the link here: **[video link]**.
+reflections on limitations. Add the link here: **[https://drive.google.com/file/d/1HwSLjAokQyaHN7FwC63hQLeIJ4K8c185/view?usp=sharing]**.
